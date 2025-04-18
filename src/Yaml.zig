@@ -7,6 +7,7 @@ const log = std.log.scoped(.yaml);
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ErrorBundle = std.zig.ErrorBundle;
+const FieldOption = @import("FieldOption.zig");
 const Node = Tree.Node;
 const Parser = @import("Parser.zig");
 const ParseError = Parser.ParseError;
@@ -16,6 +17,7 @@ const Tree = @import("Tree.zig");
 const Yaml = @This();
 
 source: []const u8,
+options: ?[]FieldOption = null,
 docs: std.ArrayListUnmanaged(Value) = .empty,
 tree: ?Tree = null,
 parse_errors: ErrorBundle = .empty,
@@ -125,22 +127,14 @@ fn parseFloat(self: Yaml, comptime T: type, value: Value) Error!T {
 fn parseBoolean(self: Yaml, comptime T: type, value: Value) Error!T {
     _ = self;
     const raw = try value.asScalar();
+    const max_len = FieldOption.SupportedBoolForm.max_len;
 
-    if (raw.len > 0 and raw.len <= longestBooleanValueString) {
-        var buffer: [longestBooleanValueString]u8 = undefined;
+    if (raw.len > 0 and raw.len <= max_len) {
+        var buffer: [max_len]u8 = undefined;
         const lower_raw = std.ascii.lowerString(&buffer, raw);
 
-        for (supportedTruthyBooleanValue) |v| {
-            if (std.mem.eql(u8, v, lower_raw)) {
-                return true;
-            }
-        }
-
-        for (supportedFalsyBooleanValue) |v| {
-            if (std.mem.eql(u8, v, lower_raw)) {
-                return false;
-            }
-        }
+        if (FieldOption.SupportedBoolForm.isTruthy(lower_raw)) return true;
+        if (FieldOption.SupportedBoolForm.isFalsy(lower_raw)) return false;
     }
 
     return error.TypeMismatch;
@@ -176,25 +170,23 @@ fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T
     var parsed: T = undefined;
 
     inline for (struct_info.fields) |field| {
-        var value: ?Value = map.get(field.name) orelse blk: {
+        const value: ?Value = map.get(field.name) orelse blk: {
             const field_name = try mem.replaceOwned(u8, arena, field.name, "_", "-");
             break :blk map.get(field_name);
         };
 
-        if (@typeInfo(field.type) == .optional) {
-            if (value == null) blk: {
-                const maybe_default_value = field.defaultValue() orelse break :blk;
-                value = Value.encode(arena, maybe_default_value) catch break :blk;
-            }
-            @field(parsed, field.name) = try self.parseOptional(arena, field.type, value);
-            continue;
-        }
-
-        const unwrapped = value orelse {
+        const info = @typeInfo(field.type);
+        if (value) |v| {
+            const field_type = if (info == .optional) info.optional.child else field.type;
+            @field(parsed, field.name) = try self.parseValue(arena, field_type, v);
+        } else if (field.defaultValue()) |def| {
+            @field(parsed, field.name) = def;
+        } else if (info == .optional) {
+            @field(parsed, field.name) = null;
+        } else {
             log.debug("missing struct field: {s}: {s}", .{ field.name, @typeName(field.type) });
             return error.StructFieldMissing;
-        };
-        @field(parsed, field.name) = try self.parseValue(arena, field.type, unwrapped);
+        }
     }
 
     return parsed;
@@ -244,20 +236,6 @@ pub fn stringify(self: Yaml, writer: anytype) !void {
     try writer.writeAll("...\n");
 }
 
-const supportedTruthyBooleanValue: [4][]const u8 = .{ "y", "yes", "on", "true" };
-const supportedFalsyBooleanValue: [4][]const u8 = .{ "n", "no", "off", "false" };
-
-const longestBooleanValueString = blk: {
-    var lengths: [supportedTruthyBooleanValue.len + supportedFalsyBooleanValue.len]usize = undefined;
-    for (supportedTruthyBooleanValue, 0..) |v, i| {
-        lengths[i] = v.len;
-    }
-    for (supportedFalsyBooleanValue, supportedTruthyBooleanValue.len..) |v, i| {
-        lengths[i] = v.len;
-    }
-    break :blk mem.max(usize, &lengths);
-};
-
 pub const Error = error{
     InvalidCharacter,
     Unimplemented,
@@ -276,7 +254,7 @@ pub const YamlError = error{
     DuplicateMapKey,
     OutOfMemory,
     CannotEncodeValue,
-} || ParseError || std.fmt.ParseIntError;
+} || ParseError || Error || std.fmt.ParseIntError;
 
 pub const StringifyError = error{
     OutOfMemory,
@@ -533,24 +511,57 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn encode(arena: Allocator, input: anytype) YamlError!?Value {
+    pub fn encode(arena: Allocator, comptime options: ?[]const FieldOption, input: anytype, comptime settings: ?FieldOption.Settings) YamlError!?Value {
         switch (@typeInfo(@TypeOf(input))) {
             .comptime_int,
             .int,
+            => {
+                const format: FieldOption.SupportedIntForm = if (settings) |s| switch (s.format) {
+                    .default => FieldOption.SupportedIntForm.default,
+                    .int => s.format.int,
+                    else => return Error.TypeMismatch,
+                }
+                else FieldOption.SupportedIntForm.default;
+
+                const string = format.formatString();
+                return Value{ .scalar = try std.fmt.allocPrint(arena, string, .{input}) };
+            },
+
             .comptime_float,
             .float,
-            => return Value{ .scalar = try std.fmt.allocPrint(arena, "{d}", .{input}) },
+            => {
+                const format: FieldOption.SupportedFloatForm = if (settings) |s| switch (s.format) {
+                    .default => FieldOption.SupportedFloatForm.default,
+                    .float => s.format.float,
+                    else => return Error.TypeMismatch,
+                }
+                else FieldOption.SupportedFloatForm.default;
 
-            // TODO - Support per-field option to use yes/no or on/off instead of true/false
-            .bool,
-            => return Value{ .scalar = try std.fmt.allocPrint(arena, "{}", .{input}) },
+                const string = format.formatString();
+                return Value{ .scalar = try std.fmt.allocPrint(arena, string, .{input}) };
+            },
+
+            .bool, => {
+                const format: FieldOption.SupportedBoolForm = if (settings) |s| switch (s.format) {
+                    .default => FieldOption.SupportedBoolForm.default,
+                    .boolean => s.format.boolean,
+                    else => return Error.TypeMismatch,
+                }
+                else FieldOption.SupportedBoolForm.default;
+
+                const string = FieldOption.SupportedBoolForm.string_table[@intFromEnum(format)][@intFromBool(input)];
+                return Value{ .scalar = try std.fmt.allocPrint(arena, "{s}", .{string}) };
+            },
 
             .@"struct" => |info| if (info.is_tuple) {
                 var list: std.ArrayListUnmanaged(Value) = .empty;
                 try list.ensureTotalCapacityPrecise(arena, info.fields.len);
 
                 inline for (info.fields) |field| {
-                    if (try encode(arena, @field(input, field.name))) |value| {
+                    const field_val = @field(input, field.name);
+                    const field_settings = comptime fieldSettings(options, @TypeOf(input), field);
+
+                    if (try encode(arena, options, field_val, field_settings)) |value| {
                         list.appendAssumeCapacity(value);
                     }
                 }
@@ -561,9 +572,30 @@ pub const Value = union(enum) {
                 try map.ensureTotalCapacity(arena, info.fields.len);
 
                 inline for (info.fields) |field| {
-                    if (try encode(arena, @field(input, field.name))) |value| {
-                        const key = try arena.dupe(u8, field.name);
-                        map.putAssumeCapacityNoClobber(key, value);
+                    const field_val = @field(input, field.name);
+                    const field_settings = comptime fieldSettings(options, @TypeOf(input), field);
+
+                    const use_field: bool = blk: {
+                        if (field_settings) |s| {
+                            if (s.flags.output_default_value) break :blk true;
+                        }
+
+                        if (field.defaultValue()) |def| {
+                            const field_info = @typeInfo(field.type);
+
+                            if (field_info == .pointer and field_info.pointer.size == .slice) {
+                                if (std.mem.eql(@TypeOf(field_val[0]), def, field_val)) break :blk false;
+                            }  
+                            else if (std.meta.eql(def, field_val)) break :blk false;
+                        }
+                        break :blk true;
+                    };
+
+                    if (use_field) {
+                        if (try encode(arena, options, field_val, field_settings)) |value| {
+                            const key = try arena.dupe(u8, field.name);
+                            map.putAssumeCapacityNoClobber(key, value);
+                        }
                     }
                 }
 
@@ -572,21 +604,22 @@ pub const Value = union(enum) {
 
             .@"union" => |info| if (info.tag_type) |tag_type| {
                 inline for (info.fields) |field| {
+                    // TODO - can these be fields in the settings sense?
                     if (@field(tag_type, field.name) == input) {
-                        return try encode(arena, @field(input, field.name));
+                        return try encode(arena, options, @field(input, field.name), null);
                     }
                 } else unreachable;
             } else return error.UntaggedUnion,
 
-            .@"enum" => return try encode(arena, @tagName(input)),
+            .@"enum" => return try encode(arena, options, @tagName(input), null),
 
-            .array => return encode(arena, &input),
+            .array => return encode(arena, options, &input, settings),
 
             .pointer => |info| switch (info.size) {
                 .one => switch (@typeInfo(info.child)) {
                     .array => |child_info| {
                         const Slice = []const child_info.child;
-                        return encode(arena, @as(Slice, input));
+                        return encode(arena, options, @as(Slice, input), null);
                     },
                     else => {
                         @compileError("Unhandled type: " ++ @typeName(info.child));
@@ -601,7 +634,7 @@ pub const Value = union(enum) {
                     try list.ensureTotalCapacityPrecise(arena, input.len);
 
                     for (input) |elem| {
-                        if (try encode(arena, elem)) |value| {
+                        if (try encode(arena, options, elem, null)) |value| {
                             list.appendAssumeCapacity(value);
                         } else {
                             log.debug("Could not encode value in a list: {any}", .{elem});
@@ -616,9 +649,7 @@ pub const Value = union(enum) {
                 },
             },
 
-            // TODO we should probably have an option to encode `null` and also
-            // allow for some default value too.
-            .optional => return if (input) |val| encode(arena, val) else null,
+            .optional => return if (input) |val| encode(arena, options, val, settings) else null,
 
             .null => return null,
 
@@ -626,6 +657,19 @@ pub const Value = union(enum) {
                 @compileError("Unhandled type: " ++ @typeName(@TypeOf(input)));
             },
         }
+    }
+
+    inline fn fieldSettings(
+        options: ?[]const FieldOption,
+        parent: type,
+        field: std.builtin.Type.StructField)
+    ?FieldOption.Settings {
+        const name = @typeName(parent) ++ field.name;
+        inline for (options orelse &[_]FieldOption{}) |opt| {
+            if (std.mem.eql(u8, name ,opt.field_name)) return opt.settings;
+        }
+
+        return null;
     }
 };
 

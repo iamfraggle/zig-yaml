@@ -363,6 +363,28 @@ test "simple map typed" {
     try testing.expectEqualStrings("wait, what?", simple.c);
 }
 
+test "struct fields with default values" {
+    const source =
+        \\c: 'wait, what?'
+    ;
+
+    var yaml: Yaml = .{ .source = source };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+
+    const simple = try yaml.parse(arena.allocator(), struct {
+        a: usize = 0,
+        b: []const u8 = "hello there",
+        c: []const u8
+    });
+    try testing.expectEqual(@as(usize, 0), simple.a);
+    try testing.expectEqualStrings("hello there", simple.b);
+    try testing.expectEqualStrings("wait, what?", simple.c);
+}
+
 test "typed nested structs" {
     const source =
         \\a:
@@ -744,6 +766,19 @@ test "stringify a struct with an optional" {
         \\a: 1
         \\c: 2.5
     , struct { a: i64, b: ?f64, c: f64 }{ .a = 1, .b = null, .c = 2.5 });
+}
+
+test "stringify a struct with a default value" {
+    try testStringify(
+        \\a: 1
+        \\b: 2
+        \\c: 2.5
+    , struct { a: i64, b: f64 = 1.5, c: f64 }{ .a = 1, .b = 2.0, .c = 2.5 });
+
+    try testStringify(
+        \\a: 1
+        \\c: 2.5
+    , struct { a: i64, b: f64 = 1.5, c: f64 }{ .a = 1, .b = 1.5, .c = 2.5 });
 }
 
 test "stringify a struct with all optionals" {
