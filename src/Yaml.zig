@@ -175,7 +175,7 @@ fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T
     const struct_info = @typeInfo(T).@"struct";
     var parsed: T = undefined;
 
-    inline for (struct_info.fields) |field| {
+    inline for (struct_info.fields) |field| loop: {
         const value: ?Value = map.get(field.name) orelse blk: {
             const field_name = try mem.replaceOwned(u8, arena, field.name, "_", "-");
             break :blk map.get(field_name);
@@ -187,6 +187,10 @@ fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T
         }
 
         const unwrapped = value orelse {
+            if (field.defaultValue()) |def| {
+                @field(parsed, field.name) = def;
+                break :loop;
+            }
             log.debug("missing struct field: {s}: {s}", .{ field.name, @typeName(field.type) });
             return error.StructFieldMissing;
         };
@@ -556,8 +560,20 @@ pub const Value = union(enum) {
                 var map: Map = .empty;
                 try map.ensureTotalCapacity(arena, info.fields.len);
 
-                inline for (info.fields) |field| {
-                    if (try encode(arena, @field(input, field.name))) |value| {
+                inline for (info.fields) |field| loop: {
+                    const field_val = @field(input, field.name);
+
+                    if (field.defaultValue()) |def| {
+                        // TODO - provide options to enable forcing a value to be encoded
+                        //        even if it is the default
+                        const field_info = @typeInfo(field.type);
+                        if (field_info == .pointer and field_info.pointer.size == .slice) {
+                            if (std.mem.eql(@TypeOf(field_val[0]), def, field_val)) break :loop;
+                        }  
+                        else if (std.meta.eql(def, field_val)) break :loop;
+                    }
+
+                    if (try encode(arena, field_val)) |value| {
                         const key = try arena.dupe(u8, field.name);
                         map.putAssumeCapacityNoClobber(key, value);
                     }
