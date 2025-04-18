@@ -18,9 +18,9 @@ fn loadFromFile(file_path: []const u8) !Yaml {
     const source = try reader.interface.allocRemaining(gpa, .unlimited);
     defer gpa.free(source);
 
-    var yaml: Yaml = .{ .source = source };
+    var yaml: Yaml = .{};
     errdefer yaml.deinit(gpa);
-    try yaml.load(gpa);
+    try yaml.load(gpa, source);
     return yaml;
 }
 

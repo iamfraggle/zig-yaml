@@ -107,10 +107,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const source = try file_reader.interface.allocRemaining(arena, .unlimited);
 
-    var yaml: Yaml = .{ .source = source };
-    defer yaml.deinit(arena);
+    var yaml: Yaml = .{};
+    defer yaml.deinit(allocator);
 
-    yaml.load(arena) catch |err| switch (err) {
+    yaml.load(allocator, source) catch |err| switch (err) {
         error.ParseFailure => {
             assert(yaml.parse_errors.errorMessageCount() > 0);
             yaml.parse_errors.renderToStderr(io, .{}, .auto) catch {};

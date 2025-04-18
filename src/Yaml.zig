@@ -16,7 +16,6 @@ const Token = Tokenizer.Token;
 const Tree = @import("Tree.zig");
 const Yaml = @This();
 
-source: []const u8,
 docs: std.ArrayListUnmanaged(Value) = .empty,
 tree: ?Tree = null,
 parse_errors: ErrorBundle = .empty,
@@ -33,8 +32,8 @@ pub fn deinit(self: *Yaml, gpa: Allocator) void {
     self.* = undefined;
 }
 
-pub fn load(self: *Yaml, gpa: Allocator) !void {
-    var parser = try Parser.init(gpa, self.source);
+pub fn load(self: *Yaml, gpa: Allocator, source: []const u8) !void {
+    var parser = try Parser.init(gpa, source);
     defer parser.deinit(gpa);
 
     parser.parse(gpa) catch |err| switch (err) {
