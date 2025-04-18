@@ -93,10 +93,10 @@ pub fn main() !void {
 
     const source = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
 
-    var yaml: Yaml = .{ .source = source };
+    var yaml: Yaml = .{};
     defer yaml.deinit(allocator);
 
-    yaml.load(allocator) catch |err| switch (err) {
+    yaml.load(allocator, source) catch |err| switch (err) {
         error.ParseFailure => {
             assert(yaml.parse_errors.errorMessageCount() > 0);
             yaml.parse_errors.renderToStdErr(.{ .ttyconf = std.io.tty.detectConfig(std.io.getStdErr()) });
