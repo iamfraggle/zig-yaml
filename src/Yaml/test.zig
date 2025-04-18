@@ -113,6 +113,25 @@ test "several integer bases" {
     try testing.expectEqualSlices(i8, &[_]i8{ 10, -10, 16, -16, 8, -8 }, &arr);
 }
 
+test "bools" {
+    const source =
+        \\- false
+        \\- true
+    ;
+
+    var yaml: Yaml = .{ .source = source };
+    defer yaml.deinit(testing.allocator);
+    try yaml.load(testing.allocator);
+
+    try testing.expectEqual(yaml.docs.items.len, 1);
+
+    var arena = Arena.init(testing.allocator);
+    defer arena.deinit();
+
+    const arr = try yaml.parse(arena.allocator(), [2]bool);
+    try testing.expectEqualSlices(bool, &[_]bool{ false, true }, &arr);
+}
+
 test "enums" {
     const TestEnum = enum {
         alpha,
@@ -666,6 +685,11 @@ test "stringify a list" {
 
     const arr: [3]i64 = .{ 1, 2, 3 };
     try testStringify("[ 1, 2, 3 ]", arr);
+}
+
+test "stringify a bool" {
+    try testStringify("false", false);
+    try testStringify("true", true);
 }
 
 test "stringify an enum" {
