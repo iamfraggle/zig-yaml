@@ -5,6 +5,7 @@ const testing = std.testing;
 
 const Arena = std.heap.ArenaAllocator;
 const Yaml = @import("../Yaml.zig");
+const FieldOption = @import("../FieldOption.zig");
 
 test "simple list" {
     const source =
@@ -735,16 +736,118 @@ test "duplicate map keys" {
     try testing.expectError(error.DuplicateMapKey, yaml.load(testing.allocator));
 }
 
-fn testStringify(expected: []const u8, input: anytype) !void {
+fn testStringifyWithOptions(expected: []const u8, input: anytype, comptime options: ?[]const FieldOption) !void {
     var output = std.ArrayList(u8).init(testing.allocator);
     defer output.deinit();
 
-    try stringify(testing.allocator, input, output.writer());
+    try stringify(testing.allocator, input, output.writer(), options);
     try testing.expectEqualStrings(expected, output.items);
+}
+
+fn testStringify(expected: []const u8, input: anytype) !void { 
+    return testStringifyWithOptions(expected, input, null);
 }
 
 test "stringify an int" {
     try testStringify("128", @as(u32, 128));
+}
+
+test "stringify ints in different formats" {
+    const Struct = struct {
+        bin: u32,
+        oct: u32,
+        oct_c: u32,
+        dec: u32,
+        hex: u32,
+        HEX: u32,
+        def: u32,
+        def_int: u32,
+    };
+
+    const vals = Struct{
+        .bin = 0b110011011,
+        .oct = 0o101,
+        .oct_c = 0o174,
+        .dec = 4816,
+        .hex = 0x192a3b4c,
+        .HEX = 0x5D6E7F80,
+        .def = 2698741,
+        .def_int = 42949842,
+    };
+
+    const options = [_]FieldOption{
+        FieldOption.define(Struct, "bin", .{ .format = .{ .int = .binary } }),
+        FieldOption.define(Struct, "oct", .{ .format = .{ .int = .octal } }),
+        FieldOption.define(Struct, "oct_c", .{ .format = .{ .int = .octal_c } }),
+        FieldOption.define(Struct, "dec", .{ .format = .{ .int = .decimal } }),
+        FieldOption.define(Struct, "hex", .{ .format = .{ .int = .hex_lower } }),
+        FieldOption.define(Struct, "HEX", .{ .format = .{ .int = .hex_upper } }),
+        FieldOption.define(Struct, "def", .{}),
+        FieldOption.define(Struct, "def_int", .{ .format = .{ .int = .default } }),
+    };
+
+    try testStringifyWithOptions(
+        \\bin: 0b110011011
+        \\oct: 0o101
+        \\oct_c: 0174
+        \\dec: 4816
+        \\hex: 0x192a3b4c
+        \\HEX: 0X5D6E7F80
+        \\def: 2698741
+        \\def_int: 42949842
+        , vals, &options);
+}
+
+test "stringify int with invalid format option" {
+    const Struct = struct {
+        int: u32,
+    };
+
+    try testing.expectError(error.TypeMismatch, testStringifyWithOptions("", Struct{.int = 10},
+        &[_]FieldOption{FieldOption.define(Struct, "int", .{ .format = .{ .float = .decimal } })}));
+}
+
+test "stringify a float" {
+    try testStringify("128.386", @as(f32, 128.386));
+}
+
+test "stringify floats in different formats" {
+    const Struct = struct {
+        dec: f32,
+        exp: f32,
+        def: f32,
+        def_flt: f32,
+    };
+
+    const vals = Struct{
+        .dec = 4816.167,
+        .exp = 7.115e14,
+        .def = 116.198,
+        .def_flt = 981.6512,
+    };
+
+    const options = [_]FieldOption{
+        FieldOption.define(Struct, "dec", .{ .format = .{ .float = .decimal } }),
+        FieldOption.define(Struct, "exp", .{ .format = .{ .float = .scientific } }),
+        FieldOption.define(Struct, "def", .{}),
+        FieldOption.define(Struct, "def_flt", .{ .format = .{ .float = .default } }),
+    };
+
+    try testStringifyWithOptions(
+        \\dec: 4816.167
+        \\exp: 7.115e14
+        \\def: 116.198
+        \\def_flt: 981.6512
+        , vals, &options);
+}
+
+test "stringify float with invalid format option" {
+    const Struct = struct {
+        float: f32,
+    };
+
+    try testing.expectError(error.TypeMismatch, testStringifyWithOptions("", Struct{.float = 10.13},
+        &[_]FieldOption{FieldOption.define(Struct, "float", .{ .format = .{ .boolean = .on_off } })}));
 }
 
 test "stringify a simple struct" {
@@ -768,17 +871,31 @@ test "stringify a struct with an optional" {
     , struct { a: i64, b: ?f64, c: f64 }{ .a = 1, .b = null, .c = 2.5 });
 }
 
+const StructOfFloatsWithADefault = struct { a: i64, b: f64 = 1.5, c: f64 };
+
 test "stringify a struct with a default value" {
     try testStringify(
         \\a: 1
         \\b: 2
         \\c: 2.5
-    , struct { a: i64, b: f64 = 1.5, c: f64 }{ .a = 1, .b = 2.0, .c = 2.5 });
+    , StructOfFloatsWithADefault{ .a = 1, .b = 2.0, .c = 2.5 });
 
     try testStringify(
         \\a: 1
         \\c: 2.5
-    , struct { a: i64, b: f64 = 1.5, c: f64 }{ .a = 1, .b = 1.5, .c = 2.5 });
+    , StructOfFloatsWithADefault{ .a = 1, .b = 1.5, .c = 2.5 });
+}
+
+test "stringify a struct and force a default value to be included" {
+    try testStringifyWithOptions(
+        \\a: 1
+        \\b: 1.5
+        \\c: 2.5
+    , StructOfFloatsWithADefault{ .a = 1, .b = 1.5, .c = 2.5 }
+    , &[_]FieldOption{FieldOption.define(
+        StructOfFloatsWithADefault,
+        "b",
+        .{ .flags = .{.output_default_value = true }})});
 }
 
 test "stringify a struct with all optionals" {
@@ -891,6 +1008,38 @@ test "struct default value test" {
 test "stringify a bool" {
     try testStringify("false", false);
     try testStringify("true", true);
+}
+
+test "stringify bools differently" {
+    const BoolStruct = struct {
+        a: bool,
+        b: bool,
+        c: bool,
+        d: bool,
+    };
+
+    const options = [_]FieldOption{
+        FieldOption.define(BoolStruct, "a", .{ .format = .{ .boolean = .y_n }}),
+        FieldOption.define(BoolStruct, "b", .{ .format = .{ .boolean = .yes_no }}),
+        FieldOption.define(BoolStruct, "c", .{ .format = .{ .boolean = .on_off }}),
+        FieldOption.define(BoolStruct, "d", .{ .format = .{ .boolean = .true_false }}),
+    };
+
+    try testStringifyWithOptions(
+        \\a: n
+        \\b: no
+        \\c: off
+        \\d: false
+    , BoolStruct{ .a = false, .b = false, .c = false, .d = false }
+    , &options);
+
+    try testStringifyWithOptions(
+        \\a: y
+        \\b: yes
+        \\c: on
+        \\d: true
+    , BoolStruct{ .a = true, .b = true, .c = true, .d = true }
+    , &options);
 }
 
 test "stringify an enum" {
