@@ -1,4 +1,6 @@
 const std = @import("std");
+const FieldOption = @This();
+const Allocator = std.mem.Allocator;
 
 pub const SupportedBoolForm = enum {
     y_n,
@@ -73,6 +75,9 @@ pub const SupportedFloatForm = enum {
     }
 };
 
+pub const ParseCallback = *const fn (type, *anyopaque, anytype, Allocator) callconv(.@"inline") anyerror!void;
+pub const EncodeCallback = *const fn (type, anytype) callconv(.@"inline") anyerror!*anyopaque;
+
 pub const Settings = struct {
     format: union(enum) {
         default: void,
@@ -80,6 +85,9 @@ pub const Settings = struct {
         int: SupportedIntForm,
         float: SupportedFloatForm,
     } = .default,
+    T: ?type = null,
+    parse_cb: ?ParseCallback = null,
+    encode_cb: ?EncodeCallback = null,
     flags: packed struct {
         output_default_value: bool = false,
     } = .{},
@@ -88,7 +96,7 @@ pub const Settings = struct {
 field_name: []const u8,
 settings: Settings,
 
-pub inline fn define(parent: type, field_name: []const u8, settings: Settings) @This() {
+pub inline fn define(parent: type, field_name: []const u8, settings: Settings) FieldOption {
     const info = @typeInfo(parent);
     if (info != .@"struct") unreachable;
     var field_exists = false;
@@ -101,8 +109,20 @@ pub inline fn define(parent: type, field_name: []const u8, settings: Settings) @
     }
     if (!field_exists) unreachable;
 
-    return @This(){
+    return FieldOption{
         .field_name = @typeName(parent) ++ field_name,
         .settings = settings
     };
+}
+
+pub inline fn parseArrayList(comptime T: type, target: *anyopaque, raw: anytype, alloc: Allocator) anyerror!void {
+    const slice: T = raw;
+    var list: *std.ArrayList(@typeInfo(T).pointer.child) = @alignCast(@ptrCast(target));
+    try list.appendSlice(alloc, slice);
+}
+
+pub inline fn encodeArrayList(comptime T: type, input: anytype) anyerror!*anyopaque {
+    const list_type = @typeInfo(T).pointer.child;
+    const list: std.ArrayList(list_type) = input;
+    return @ptrCast(@constCast(&list.items));
 }
