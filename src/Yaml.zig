@@ -17,7 +17,6 @@ const Tree = @import("Tree.zig");
 const Yaml = @This();
 
 source: []const u8,
-options: ?[]FieldOption = null,
 docs: std.ArrayListUnmanaged(Value) = .empty,
 tree: ?Tree = null,
 parse_errors: ErrorBundle = .empty,
@@ -56,32 +55,41 @@ pub fn load(self: *Yaml, gpa: Allocator) !void {
     }
 }
 
-pub fn parse(self: Yaml, arena: Allocator, comptime T: type) Error!T {
+pub fn parse(self: Yaml, arena: Allocator, comptime T: type, comptime options: ?[]const FieldOption) Error!T {
+    var target: T = undefined;
+    try self.parseToPtr(arena, T, &target, options);
+    return target;
+}
+
+
+pub fn parseToPtr(self: Yaml, arena: Allocator, comptime T: type, target: *T, comptime options: ?[]const FieldOption) Error!void {
     if (self.docs.items.len == 0) {
         if (@typeInfo(T) == .void) return {};
         return error.TypeMismatch;
     }
 
     if (self.docs.items.len == 1) {
-        return self.parseValue(arena, T, self.docs.items[0]);
+        try self.parseValue(arena, T, target, self.docs.items[0], options);
+        return;
     }
 
     switch (@typeInfo(T)) {
         .array => |info| {
-            var parsed: T = undefined;
+            if (self.docs.items.len != info.len) return Error.ArraySizeMismatch;
             for (self.docs.items, 0..) |doc, i| {
-                parsed[i] = try self.parseValue(arena, info.child, doc);
+                try self.parseValue(arena, info.child, &target[i], doc, options);
             }
-            return parsed;
+            return;
         },
         .pointer => |info| {
             switch (info.size) {
                 .slice => {
                     var parsed = try arena.alloc(info.child, self.docs.items.len);
                     for (self.docs.items, 0..) |doc, i| {
-                        parsed[i] = try self.parseValue(arena, info.child, doc);
+                        try self.parseValue(arena, info.child, &parsed[i], doc, options);
                     }
-                    return parsed;
+                    target.* = parsed[0..];
+                    return;
                 },
                 else => return error.TypeMismatch,
             }
@@ -91,25 +99,25 @@ pub fn parse(self: Yaml, arena: Allocator, comptime T: type) Error!T {
     }
 }
 
-fn parseValue(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
-    return switch (@typeInfo(T)) {
-        .int => self.parseInt(T, value),
-        .bool => self.parseBoolean(bool, value),
-        .float => self.parseFloat(T, value),
-        .@"struct" => self.parseStruct(arena, T, try value.asMap()),
-        .@"union" => self.parseUnion(arena, T, value),
-        .@"enum" => std.meta.stringToEnum(T, try value.asScalar()) orelse Error.EnumTagMissing,
-        .array => self.parseArray(arena, T, try value.asList()),
+fn parseValue(self: Yaml, arena: Allocator, comptime T: type, target: *T, value: Value, comptime options: ?[]const FieldOption) Error!void {
+    switch (@typeInfo(T)) {
+        .int => { target.* = try self.parseInt(T, value); },
+        .bool => { target.* = try self.parseBoolean(bool, value); },
+        .float => { target.* = try self.parseFloat(T, value); },
+        .@"struct" => { try self.parseStruct(arena, T, target, try value.asMap(), options); },
+        .@"union" => { try self.parseUnion(arena, T, target, value, options); },
+        .@"enum" => { target.* = std.meta.stringToEnum(T, try value.asScalar()) orelse return Error.EnumTagMissing; },
+        .array => { try self.parseArray(arena, T, target, try value.asList(), options); },
         .pointer => if (value.asList()) |list| {
-            return self.parsePointer(arena, T, .{ .list = list });
+            try self.parsePointer(arena, T, target, .{ .list = list }, options);
         } else |_| {
             const scalar = try value.asScalar();
-            return self.parsePointer(arena, T, .{ .scalar = try arena.dupe(u8, scalar) });
+            try self.parsePointer(arena, T, target, .{ .scalar = try arena.dupe(u8, scalar) }, options);
         },
-        .void => error.TypeMismatch,
+        .void => return error.TypeMismatch,
         .optional => unreachable,
-        else => error.Unimplemented,
-    };
+        else => return error.Unimplemented,
+    }
 }
 
 fn parseInt(self: Yaml, comptime T: type, value: Value) Error!T {
@@ -140,13 +148,15 @@ fn parseBoolean(self: Yaml, comptime T: type, value: Value) Error!T {
     return error.TypeMismatch;
 }
 
-fn parseUnion(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
+fn parseUnion(self: Yaml, arena: Allocator, comptime T: type, target: *T, value: Value, comptime options: ?[]const FieldOption) Error!void {
     const union_info = @typeInfo(T).@"union";
 
     if (union_info.tag_type) |_| {
         inline for (union_info.fields) |field| {
-            if (self.parseValue(arena, field.type, value)) |u_value| {
-                return @unionInit(T, field.name, u_value);
+            var data: field.type = undefined;
+            if (self.parseValue(arena, field.type, &data, value, options)) {
+                target.* = @unionInit(T, field.name, data);
+                return;
             } else |err| switch (err) {
                 error.InvalidCharacter => {},
                 error.TypeMismatch => {},
@@ -159,15 +169,8 @@ fn parseUnion(self: Yaml, arena: Allocator, comptime T: type, value: Value) Erro
     return error.UnionTagMissing;
 }
 
-fn parseOptional(self: Yaml, arena: Allocator, comptime T: type, value: ?Value) Error!T {
-    const unwrapped = value orelse return null;
-    const opt_info = @typeInfo(T).optional;
-    return @as(T, try self.parseValue(arena, opt_info.child, unwrapped));
-}
-
-fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T {
+fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, target: *T, map: Map, comptime options: ?[]const FieldOption) Error!void {
     const struct_info = @typeInfo(T).@"struct";
-    var parsed: T = undefined;
 
     inline for (struct_info.fields) |field| {
         const value: ?Value = map.get(field.name) orelse blk: {
@@ -176,51 +179,61 @@ fn parseStruct(self: Yaml, arena: Allocator, comptime T: type, map: Map) Error!T
         };
 
         const info = @typeInfo(field.type);
+        const settings = comptime fieldSettings(options, T, field);
+        const field_type = blk: {
+            if (settings != null and settings.?.T != null) {
+                break :blk settings.?.T.?;
+            }
+            else if (info == .optional) break :blk info.optional.child
+            else break :blk field.type;
+        };
+
         if (value) |v| {
-            const field_type = if (info == .optional) info.optional.child else field.type;
-            @field(parsed, field.name) = try self.parseValue(arena, field_type, v);
+            var val: field_type = undefined;
+            try self.parseValue(arena, field_type, &val, v, options);
+            if (settings != null and settings.?.parse_cb != null) {
+                const cb = settings.?.parse_cb.?;
+                cb(field_type, &@field(target, field.name), val) catch return Error.Unimplemented; // TODO - add a new error type?
+            }
+            else @field(target, field.name) = val;
         } else if (field.defaultValue()) |def| {
-            @field(parsed, field.name) = def;
+            @field(target, field.name) = def;
         } else if (info == .optional) {
-            @field(parsed, field.name) = null;
+            @field(target, field.name) = null;
         } else {
             log.debug("missing struct field: {s}: {s}", .{ field.name, @typeName(field.type) });
             return error.StructFieldMissing;
         }
     }
-
-    return parsed;
 }
 
-fn parsePointer(self: Yaml, arena: Allocator, comptime T: type, value: Value) Error!T {
+fn parsePointer(self: Yaml, arena: Allocator, comptime T: type, target: *T, value: Value, comptime options: ?[]const FieldOption) Error!void {
     const ptr_info = @typeInfo(T).pointer;
 
     switch (ptr_info.size) {
         .slice => {
             if (ptr_info.child == u8) {
-                return try arena.dupe(u8, try value.asScalar());
+                target.* = try arena.dupe(u8, try value.asScalar());
+                return;
             }
 
             var parsed = try arena.alloc(ptr_info.child, value.list.len);
             for (value.list, 0..) |elem, i| {
-                parsed[i] = try self.parseValue(arena, ptr_info.child, elem);
+                try self.parseValue(arena, ptr_info.child, &parsed[i], elem, options);
             }
-            return parsed;
+            target.* = parsed[0..];
         },
         else => return error.Unimplemented,
     }
 }
 
-fn parseArray(self: Yaml, arena: Allocator, comptime T: type, list: List) Error!T {
+fn parseArray(self: Yaml, arena: Allocator, comptime T: type, target: *T, list: List, comptime options: ?[]const FieldOption) Error!void {
     const array_info = @typeInfo(T).array;
     if (array_info.len != list.len) return error.ArraySizeMismatch;
 
-    var parsed: T = undefined;
     for (list, 0..) |elem, i| {
-        parsed[i] = try self.parseValue(arena, array_info.child, elem);
+        try self.parseValue(arena, array_info.child, &target[i], elem, options);
     }
-
-    return parsed;
 }
 
 pub fn stringify(self: Yaml, writer: anytype) !void {
@@ -592,6 +605,18 @@ pub const Value = union(enum) {
                     };
 
                     if (use_field) {
+                        if (field_settings) |s| {
+                            if (s.encode_cb) |cb| {
+                                const converted_val: *s.T.? = @alignCast(@ptrCast(cb(s.T.?, field_val) catch {return YamlError.CannotEncodeValue;}));
+                                // TODO - How can we switch the value passed to the original encode call rather than duplicate the code?!?!
+                                if (try encode(arena, options, converted_val.*, field_settings)) |value| {
+                                    const key = try arena.dupe(u8, field.name);
+                                    map.putAssumeCapacityNoClobber(key, value);
+                                }
+                                return Value{ .map = map };
+                            }
+                        }
+
                         if (try encode(arena, options, field_val, field_settings)) |value| {
                             const key = try arena.dupe(u8, field.name);
                             map.putAssumeCapacityNoClobber(key, value);
@@ -658,20 +683,20 @@ pub const Value = union(enum) {
             },
         }
     }
-
-    inline fn fieldSettings(
-        options: ?[]const FieldOption,
-        parent: type,
-        field: std.builtin.Type.StructField)
-    ?FieldOption.Settings {
-        const name = @typeName(parent) ++ field.name;
-        inline for (options orelse &[_]FieldOption{}) |opt| {
-            if (std.mem.eql(u8, name ,opt.field_name)) return opt.settings;
-        }
-
-        return null;
-    }
 };
+
+inline fn fieldSettings(
+    options: ?[]const FieldOption,
+    parent: type,
+    field: std.builtin.Type.StructField)
+?FieldOption.Settings {
+    const name = @typeName(parent) ++ field.name;
+    inline for (options orelse &[_]FieldOption{}) |opt| {
+        if (std.mem.eql(u8, name ,opt.field_name)) return opt.settings;
+    }
+
+    return null;
+}
 
 pub const ErrorMsg = struct {
     msg: []const u8,

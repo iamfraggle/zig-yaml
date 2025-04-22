@@ -64,7 +64,7 @@ test "simple" {
     var arena = Arena.init(gpa);
     defer arena.deinit();
 
-    const result = try parsed.parse(arena.allocator(), Simple);
+    const result = try parsed.parse(arena.allocator(), Simple, null);
     const expected = Simple{
         .names = &[_][]const u8{ "John Doe", "MacIntosh", "Jane Austin" },
         .numbers = &[_]i16{ 10, -8, 6 },
@@ -195,7 +195,7 @@ test "single lib tbd" {
     var arena = Arena.init(gpa);
     defer arena.deinit();
 
-    const result = try parsed.parse(arena.allocator(), LibTbd);
+    const result = try parsed.parse(arena.allocator(), LibTbd, null);
     const expected = LibTbd{
         .tbd_version = 4,
         .targets = &[_][]const u8{
@@ -271,7 +271,7 @@ test "multi lib tbd" {
     var arena = Arena.init(gpa);
     defer arena.deinit();
 
-    const result = try parsed.parse(arena.allocator(), []LibTbd);
+    const result = try parsed.parse(arena.allocator(), []LibTbd, null);
     const expected = &[_]LibTbd{
         .{
             .tbd_version = 4,
